@@ -29,15 +29,20 @@ make -j$(nproc)
 
 - `Image` — 内核镜像
 - `dtbo.img` — 设备树 overlay（instantnoodle）
+- `Singularity-kona-<commit>.zip` — AnyKernel3 刷机包（CI 自动打包）
 
-## 改动
+## 实际改动
 
 - 启用 USB gadget 网络函数（CDC-ECM / RNDIS / EEM），USB 共享网络免驱直连
 - 修复 display sde / coresight 的 uninitialized 警告（借自 dreamworld）
 
+## 刷入
+
+下载 [Releases](https://github.com/SQL0106/kernel-kona-kernelsu/releases) 中的 `Singularity-kona-*.zip`（AnyKernel3 刷机包），在 recovery（TWRP / OrangeFox 等）中刷入，或解包后提取 `Image` 用 `fastboot flash boot` 写入。
+
 ## CI 产物
 
-每次 push 到 `Evolved` 分支会自动触发构建，产物上传至 Actions artifact，失败时保留完整 `build.log`。
+每次 push 到 `Evolved` 分支会自动触发构建：`Singularity-kona-<commit>.zip`（可刷机）+ `kernel-image-dtbo`（原始产物）上传至 Actions artifact；每日自动同步上游 Singularity；失败时保留完整 `build.log`。
 
 ## 源码提供
 
@@ -48,4 +53,4 @@ make -j$(nproc)
 
 ## Build
 
-- DeepSeek V4 Flash&Pro · OpenCode · $0.67
+- DeepSeek V4 Flash&Pro · OpenCode · $0.63
