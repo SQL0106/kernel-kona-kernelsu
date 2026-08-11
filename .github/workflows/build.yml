@@ -1,0 +1,85 @@
+name: Build Singularity Kernel
+
+on:
+  push:
+    branches: ["Evolved"]
+    paths-ignore:
+      - "*.md"
+      - "Documentation/**"
+  workflow_dispatch:
+
+env:
+  ARCH: arm64
+  CLANG_ROOT: /opt/clang
+  CCACHE_DIR: ~/.ccache
+  CCACHE_MAXSIZE: 5G
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache flex bison bc build-essential \
+            libssl-dev libelf-dev python3 python3-pip cpio kmod
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref }}-
+            ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          ccache -M ${CCACHE_MAXSIZE}
+          ccache -z
+
+      - name: Download Google clang-r416183b
+        run: |
+          mkdir -p /tmp/clang-dl
+          curl -sL \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b669748458572622ed716407611633c5415da25c/clang-r416183b.tar.gz" \
+            -o /tmp/clang-dl/clang-r416183b.tar.gz
+          sudo mkdir -p ${CLANG_ROOT}
+          sudo tar xzf /tmp/clang-dl/clang-r416183b.tar.gz -C ${CLANG_ROOT}
+          sudo rm -rf /tmp/clang-dl
+          ${CLANG_ROOT}/bin/clang --version
+
+      - name: Build kernel
+        run: |
+          export PATH="${CLANG_ROOT}/bin:${PATH}"
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export HOSTCC="ccache clang"
+          export HOSTCXX="ccache clang++"
+          bash scripts/build-kernel.sh
+
+      - name: Show ccache stats
+        run: ccache -s
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-dtbo
+          path: |
+            out/arch/arm64/boot/Image*
+            out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/dts/qcom/*.dtb
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: out/build.log
