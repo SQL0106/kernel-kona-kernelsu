@@ -25,6 +25,11 @@ MAKE_FLAGS=(
 
 make "${MAKE_FLAGS[@]}" ${DEFCONFIG}
 
+if [ -f oplus.config ]; then
+	cat oplus.config >> "${OUTDIR}/.config"
+	make "${MAKE_FLAGS[@]}" olddefconfig
+fi
+
 make "${MAKE_FLAGS[@]}" -j"$(nproc)" 2>&1 | tee "${OUTDIR}/build.log"
 
 echo "=== Build Complete ==="
