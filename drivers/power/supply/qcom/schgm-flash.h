@@ -51,6 +51,9 @@ enum torch_mode {
 	TORCH_BOOST_MODE,
 };
 
+struct smb_charger;
+struct smb_irq_data;
+
 int schgm_flash_get_vreg_ok(struct smb_charger *chg, int *val);
 void schgm_flash_torch_priority(struct smb_charger *chg, enum torch_mode mode);
 int schgm_flash_init(struct smb_charger *chg);
