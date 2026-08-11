@@ -50,10 +50,13 @@ make -j$(nproc)
 - [JackA1ltman/dreamworld_oneplus_sm8250](https://github.com/JackA1ltman/dreamworld_oneplus_sm8250)（借用的修复）
 - [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
 - LineageOS oneplus sm8250 内核树（配置参考）
+-
+[Google clang-r416183b](https://android.googlesource.com/platform//prebuilts/clang/host/linux-x86/+/b669748458572622ed716407611633c5415da25c/clang-r416183b)
+- Google Clang
 
 ## Build
 
-- DeepSeek V4 Flash&Pro · OpenCode · $0.63
+- DeepSeek V4 Flash&Pro · OpenCode · $0.70
 
 ## 许可证
 
