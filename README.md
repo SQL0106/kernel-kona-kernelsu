@@ -39,3 +39,7 @@ make -j$(nproc)
 - [The-Anomalist/Singularity](https://github.com/The-Anomalist/Singularity)
 - [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
 - LineageOS oneplus sm8250 内核树（配置参考）
+
+## Build
+
+- DeepSeek V4 Flash · DeepSeek · $0.63
