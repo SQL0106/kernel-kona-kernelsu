@@ -30,6 +30,11 @@ make -j$(nproc)
 - `Image` — 内核镜像
 - `dtbo.img` — 设备树 overlay（instantnoodle）
 
+## 实际改动
+
+- 启用 USB gadget 网络函数（CDC-ECM / RNDIS / EEM），USB 共享网络免驱直连
+- 修复 display sde / coresight 的 uninitialized 警告（借自 dreamworld）
+
 ## CI 产物
 
 每次 push 到 `Evolved` 分支会自动触发构建，产物上传至 Actions artifact，失败时保留完整 `build.log`。
