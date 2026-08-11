@@ -13,7 +13,14 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - run: git remote add upstream https://github.com/The-Anomalist/Singularity.git
-      - run: git fetch upstream Evolved
-      - run: git merge upstream/Evolved --no-edit
+      - name: Sync Singularity (Evolved)
+        run: |
+          git remote add upstream https://github.com/The-Anomalist/Singularity.git
+          git fetch upstream Evolved
+          git merge upstream/Evolved --no-edit
+      - name: Sync dreamworld (staging)
+        run: |
+          git remote add dreamworld https://github.com/JackA1ltman/dreamworld_oneplus_sm8250.git
+          git fetch dreamworld staging
+          git merge dreamworld/staging --no-edit
       - run: git push origin Evolved
