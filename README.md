@@ -47,7 +47,7 @@ make -j$(nproc)
 ## 提供
 
 - [The-Anomalist/Singularity](https://github.com/The-Anomalist/Singularity)
-- [JackA1ltman/dreamworld_oneplus_sm8250](https://github.com/JackA1ltman/dreamworld_oneplus_sm8250)（借用的修复）
+- [JackA1ltman/dreamworld_oneplus_sm8250](https://github.com/JackA1ltman/dreamworld_oneplus_sm8250)（借用的修复和KSUN+SUSFS实现）
 - [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
 - LineageOS oneplus sm8250 内核树（配置参考）
 - [Google clang-r416183b](https://android.googlesource.com/platform//prebuilts/clang/host/linux-x86/+/b669748458572622ed716407611633c5415da25c/clang-r416183b)
