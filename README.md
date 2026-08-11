@@ -42,4 +42,4 @@ make -j$(nproc)
 
 ## Build
 
-- DeepSeek V4 Flash · DeepSeek · $0.63
+- DeepSeek V4 Flash&Pro · OpenCode · $0.63
