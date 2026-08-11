@@ -44,7 +44,7 @@ make -j$(nproc)
 
 每次 push 到 `Evolved` 分支会自动触发构建：`Singularity-kona-<commit>.zip`（可刷机）+ `kernel-image-dtbo`（原始产物）上传至 Actions artifact；每日自动同步上游 Singularity；失败时保留完整 `build.log`。
 
-## 源码提供
+## 提供
 
 - [The-Anomalist/Singularity](https://github.com/The-Anomalist/Singularity)
 - [JackA1ltman/dreamworld_oneplus_sm8250](https://github.com/JackA1ltman/dreamworld_oneplus_sm8250)（借用的修复）
