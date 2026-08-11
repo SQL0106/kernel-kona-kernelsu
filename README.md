@@ -30,7 +30,7 @@ make -j$(nproc)
 - `Image` — 内核镜像
 - `dtbo.img` — 设备树 overlay（instantnoodle）
 
-## 实际改动
+## 改动
 
 - 启用 USB gadget 网络函数（CDC-ECM / RNDIS / EEM），USB 共享网络免驱直连
 - 修复 display sde / coresight 的 uninitialized 警告（借自 dreamworld）
@@ -48,4 +48,4 @@ make -j$(nproc)
 
 ## Build
 
-- DeepSeek V4 Flash&Pro · OpenCode · $0.63
+- DeepSeek V4 Flash&Pro · OpenCode · $0.67
