@@ -25,8 +25,9 @@ MAKE_FLAGS=(
 
 make "${MAKE_FLAGS[@]}" ${DEFCONFIG}
 
-if [ -f oplus.config ]; then
-	cat oplus.config >> "${OUTDIR}/.config"
+OPLUS_CONFIG="arch/arm64/configs/vendor/oplus.config"
+if [ -f "${OPLUS_CONFIG}" ]; then
+	cat "${OPLUS_CONFIG}" >> "${OUTDIR}/.config"
 	make "${MAKE_FLAGS[@]}" olddefconfig
 fi
 
