@@ -34,7 +34,7 @@ make -j$(nproc)
 
 每次 push 到 `Evolved` 分支会自动触发构建，产物上传至 Actions artifact，失败时保留完整 `build.log`。
 
-## 致谢
+## 源码提供
 
 - [The-Anomalist/Singularity](https://github.com/The-Anomalist/Singularity)
 - [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
