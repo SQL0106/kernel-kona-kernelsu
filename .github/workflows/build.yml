@@ -67,6 +67,62 @@ jobs:
       - name: Show ccache stats
         run: ccache -s
 
+      - name: Package AnyKernel3 zip
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cp out/arch/arm64/boot/Image ak3/Image
+          cat > ak3/anykernel.sh <<'EOF'
+### AnyKernel3 Ramdisk Mod Script
+## osm0sis @ xda-developers
+
+## AnyKernel setup
+# begin properties
+properties() { '
+kernel.string=Singularity Kernel for OnePlus 8 (kona) by The-Anomalist
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=instantnoodle
+device.name2=instantnoodlep
+device.name3=kebab
+device.name4=lemonades
+device.name5=OnePlus8
+device.name6=OnePlus8Pro
+device.name7=OnePlus8T
+device.name8=OnePlus9R
+supported.versions=
+supported.patchlevels=
+'; } # end properties
+
+# shell variables
+block=boot;
+is_slot_device=1;
+ramdisk_compression=auto;
+
+## AnyKernel methods (DO NOT CHANGE)
+# import patching functions/variables - see for reference
+. tools/ak3-core.sh;
+
+## AnyKernel install
+dump_boot;
+
+write_boot;
+## end install
+EOF
+          SHA_SHORT=${GITHUB_SHA:0:7}
+          cd ak3 && zip -r9 "../Singularity-kona-${SHA_SHORT}.zip" . -x "*.git*" && cd ..
+          ls -lh Singularity-kona-*.zip
+
+      - name: Upload AK3 zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ak3-zip
+          path: Singularity-kona-*.zip
+          if-no-files-found: warn
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
