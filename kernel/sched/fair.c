@@ -7571,96 +7571,69 @@ cpu_util_next_walt(int cpu, struct task_struct *p, int dst_cpu)
  * to compute what would be the energy if we decided to actually migrate that
  * task.
  */
-static unsigned long
-compute_energy_pd(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
-{
-	unsigned int max_util, cpu_util, cpu_cap;
-	unsigned long sum_util;
-	struct cpumask *pd_mask = perf_domain_span(pd);
-	int cpu;
-
-	/*
-	 * The energy model mandates all the CPUs of a performance domain have
-	 * the same capacity.
-	 */
-	cpu_cap = arch_scale_cpu_capacity(NULL, cpumask_first(pd_mask));
-	max_util = 0;
-	sum_util = 0;
-
-	/*
-	 * The capacity state of CPUs of the current rd can be driven by CPUs of
-	 * another rd if they belong to the same performance domain. So, account
-	 * for the utilization of these CPUs too by masking pd with cpu_online_mask
-	 * instead of the rd span.
-	 */
-	for_each_cpu_and(cpu, pd_mask, cpu_online_mask) {
-#ifdef CONFIG_SCHED_WALT
-		cpu_util = cpu_util_next_walt(cpu, p, dst_cpu);
-		sum_util += cpu_util;
-#else
-		unsigned int util_cfs;
-		struct task_struct *tsk;
-
-		util_cfs = cpu_util_next(cpu, p, dst_cpu);
-
-		/*
-		 * Busy time computation: utilization clamping is not required since
-		 * the ratio (sum_util / cpu_capacity) is already enough to scale the
-		 * EM reported power consumption at the (eventually clamped)
-		 * cpu_capacity.
-		 */
-		sum_util += schedutil_cpu_util(cpu, util_cfs, cpu_cap,
-					       ENERGY_UTIL, NULL);
-
-		/*
-		 * Performance domain frequency: utilization clamping must be
-		 * considered since it affects the selection of the performance domain
-		 * frequency.
-		 */
-		tsk = cpu == dst_cpu ? p : NULL;
-		cpu_util = schedutil_cpu_util(cpu, util_cfs, cpu_cap,
-					      FREQUENCY_UTIL, tsk);
-#endif
-		max_util = max(max_util, cpu_util);
-	}
-
-	return em_pd_energy(pd->em_pd, max_util, sum_util);
-}
-
-static struct perf_domain *eas_pd_for_cpu(struct perf_domain *pd, int cpu)
-{
-	for (; pd; pd = pd->next) {
-		if (cpumask_test_cpu(cpu, perf_domain_span(pd)))
-			return pd;
-	}
-
-	return NULL;
-}
-
-static long
-compute_energy_delta(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
-{
-	unsigned long base_energy;
-
-	pd = eas_pd_for_cpu(pd, dst_cpu);
-	if (!pd)
-		return LONG_MAX;
-
-	base_energy = compute_energy_pd(p, -1, pd);
-
-	return compute_energy_pd(p, dst_cpu, pd) - base_energy;
-}
-
 static long
 compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 {
-	unsigned long energy = 0;
+	unsigned int max_util, cpu_util, cpu_cap;
+	unsigned long sum_util, energy = 0;
+	int cpu;
 
-	if (sched_feat(EAS_ENERGY_DELTA) && !task_on_rq_queued(p))
-		return compute_energy_delta(p, dst_cpu, pd);
+	/* Evaluate the complete post-placement energy landscape. */
+	for (; pd; pd = pd->next) {
+		struct cpumask *pd_mask = perf_domain_span(pd);
 
-	for (; pd; pd = pd->next)
-		energy += compute_energy_pd(p, dst_cpu, pd);
+		/*
+		 * The energy model mandates all the CPUs of a performance
+		 * domain have the same capacity.
+		 */
+		cpu_cap = arch_scale_cpu_capacity(NULL, cpumask_first(pd_mask));
+		max_util = sum_util = 0;
+
+		/*
+		 * The capacity state of CPUs of the current rd can be driven by
+		 * CPUs of another rd if they belong to the same performance
+		 * domain. So, account for the utilization of these CPUs too
+		 * by masking pd with cpu_online_mask instead of the rd span.
+		 *
+		 * If an entire performance domain is outside of the current rd,
+		 * it will not appear in its pd list and will not be accounted
+		 * by compute_energy().
+		 */
+		for_each_cpu_and(cpu, pd_mask, cpu_online_mask) {
+#ifdef CONFIG_SCHED_WALT
+			cpu_util = cpu_util_next_walt(cpu, p, dst_cpu);
+			sum_util += cpu_util;
+#else
+			unsigned int util_cfs;
+			struct task_struct *tsk;
+
+			util_cfs = cpu_util_next(cpu, p, dst_cpu);
+
+			/*
+			 * Busy time computation: utilization clamping is not
+			 * required since the ratio (sum_util / cpu_capacity)
+			 * is already enough to scale the EM reported power
+			 * consumption at the (eventually clamped) cpu_capacity.
+			 */
+			sum_util += schedutil_cpu_util(cpu, util_cfs, cpu_cap,
+						       ENERGY_UTIL, NULL);
+
+			/*
+			 * Performance domain frequency: utilization clamping
+			 * must be considered since it affects the selection
+			 * of the performance domain frequency.
+			 * NOTE: in case RT tasks are running, by default the
+			 * FREQUENCY_UTIL's utilization can be max OPP.
+			 */
+			tsk = cpu == dst_cpu ? p : NULL;
+			cpu_util = schedutil_cpu_util(cpu, util_cfs, cpu_cap,
+						      FREQUENCY_UTIL, tsk);
+#endif
+			max_util = max(max_util, cpu_util);
+		}
+
+		energy += em_pd_energy(pd->em_pd, max_util, sum_util);
+	}
 
 	return energy;
 }
@@ -7751,6 +7724,71 @@ static void select_cpu_candidates(struct sched_domain *sd, cpumask_t *cpus,
 		cpumask_set_cpu(best_idle_cpu, cpus);
 	else if (highest_spare_cap_cpu >= 0)
 		cpumask_set_cpu(highest_spare_cap_cpu, cpus);
+}
+
+/*
+ * Keep every performance domain represented in the final EAS comparison.
+ *
+ * find_best_target() is deliberately aggressive about stopping after it has
+ * found a suitable CPU in the first capacity group.  That is a useful fast
+ * path for small, latency-sensitive work, but it also means that a waking
+ * compute thread can remain trapped on a LITTLE CPU while its WALT signal is
+ * growing.  It is particularly visible with parallel, bursty workloads: the
+ * first group fills up while the larger domains never become EAS candidates.
+ *
+ * Add the CPU with the most post-wakeup spare capacity from each PD.  The
+ * Energy Model still makes the placement decision; this only prevents the
+ * candidate pre-selection heuristic from hiding an entire cluster from it.
+ */
+static void add_pd_spare_candidates(struct sched_domain *sd, cpumask_t *cpus,
+				    struct perf_domain *pd,
+				    struct task_struct *p)
+{
+	int cpu;
+
+	for (; pd; pd = pd->next) {
+		int best_cpu = -1, fallback_cpu = -1;
+		unsigned long best_spare = 0, fallback_spare = 0;
+
+		for_each_cpu_and(cpu, perf_domain_span(pd),
+				 sched_domain_span(sd)) {
+			unsigned long capacity, util, spare;
+
+			if (!cpumask_test_cpu(cpu, &p->cpus_allowed) ||
+			    !cpu_active(cpu) || cpu_isolated(cpu) ||
+			    is_reserved(cpu) || sched_cpu_high_irqload(cpu))
+				continue;
+
+			capacity = capacity_of(cpu);
+#ifdef CONFIG_SCHED_WALT
+			util = cpu_util_next_walt(cpu, p, cpu);
+#else
+			util = cpu_util_next(cpu, p, cpu);
+#endif
+			util = uclamp_rq_util_with(cpu_rq(cpu), util, p);
+			spare = capacity - min(util, capacity);
+
+			if (fallback_cpu < 0 || spare > fallback_spare) {
+				fallback_spare = spare;
+				fallback_cpu = cpu;
+			}
+
+			if (capacity * 1024 <
+			    util * sched_capacity_margin_up[cpu])
+				continue;
+
+			if (best_cpu < 0 || spare > best_spare) {
+				best_spare = spare;
+				best_cpu = cpu;
+			}
+		}
+
+		/* An overloaded domain is still useful to the global comparison. */
+		if (best_cpu < 0)
+			best_cpu = fallback_cpu;
+		if (best_cpu >= 0)
+			cpumask_set_cpu(best_cpu, cpus);
+	}
 }
 
 /*
@@ -7934,6 +7972,10 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 				   cpu : -1;
 
 		find_best_target(NULL, candidates, p, &fbt_env);
+		/* Preserve explicit latency/boost/RTG placement policy. */
+		if (!fbt_env.need_idle && !boosted && !is_rtg &&
+		    !task_placement_boost_enabled(p))
+			add_pd_spare_candidates(sd, candidates, pd, p);
 	} else {
 		select_cpu_candidates(sd, candidates, pd, p, prev_cpu);
 	}
@@ -7978,16 +8020,18 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 		delta = task_util(p);
 #endif
 	if (task_placement_boost_enabled(p) || fbt_env.need_idle || boosted ||
-	    is_rtg || __cpu_overutilized(prev_cpu, delta) ||
+	    is_rtg ||
 	    !task_fits_max(p, prev_cpu) || cpu_isolated(prev_cpu)) {
 		if (cpumask_test_cpu(prev_cpu, candidates) &&
 		    !cpu_isolated(prev_cpu) &&
 		    !__cpu_overutilized(prev_cpu, delta) &&
 		    task_fits_max(p, prev_cpu))
 			best_energy_cpu = prev_cpu;
-		else
+		else if (task_placement_boost_enabled(p) || fbt_env.need_idle ||
+			 boosted || is_rtg) {
 			best_energy_cpu = cpu;
-		goto unlock;
+			goto unlock;
+		}
 	}
 
 	if (cpumask_test_cpu(prev_cpu, &p->cpus_allowed))
@@ -8035,7 +8079,8 @@ unlock:
 		unsigned int margin_pct = uclass_prev_cpu_energy_margin_pct();
 		unsigned long min_delta = mult_frac(prev_energy, margin_pct, 100);
 
-		if ((prev_energy - best_energy) <= min_delta)
+		if (best_energy >= prev_energy ||
+		    (prev_energy - best_energy) <= min_delta)
 			best_energy_cpu = prev_cpu;
 	}
 
