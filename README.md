@@ -35,6 +35,9 @@ make -j$(nproc)
 
 - 启用 USB gadget 网络函数（CDC-ECM / RNDIS / EEM），USB 共享网络免驱直连
 - 修复 display sde / coresight 的 uninitialized 警告（借自 dreamworld）
+- 禁用 SUSFS（与容器 mount namespace 冲突，参考 Droidspaces 提示）；保留 KernelSU-Next 完整功能
+- 启用 `CONFIG_PID_NS` / `CONFIG_FHANDLE` / `CONFIG_USER_NS`（Docker 与 systemd 运行所需）
+- 禁用 `CONFIG_FW_LOADER_USER_HELPER` 及 FALLBACK（systemd 建议，加快 udev 启动）
 
 ## 刷入
 
