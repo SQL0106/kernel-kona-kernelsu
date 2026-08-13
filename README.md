@@ -1,6 +1,6 @@
 # kernel-kona-kernelsu
 
-[Singularity](https://github.com/The-Anomalist/Singularity) 内核的 OnePlus 8 构建仓库，集成 [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)。
+[Singularity](https://github.com/The-Anomalist/Singularity) 内核的 OnePlus 8 构建仓库，集成 [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)与[Droidspaces](https://github.com/ravindu644/Droidspaces-OSS)。
 
 ## 支持的设备
 
