@@ -9,6 +9,7 @@
 
 #include <linux/interconnect-provider.h>
 #include <linux/interconnect.h>
+#include <linux/interconnect/kona.h>
 #include <linux/bitmap.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -17,6 +18,7 @@
 #include <linux/of_device.h>
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/math64.h>
 #include <linux/minmax.h>
 #include <linux/overflow.h>
@@ -56,6 +58,49 @@ enum kona_icc_role {
 	KONA_ROLE_CONFIG,
 	KONA_ROLE_RAW,
         KONA_ROLE_DISPLAY,
+};
+
+/* Stage-5 families are separate from the Stage-4 CPU BCM group mask. */
+#define KONA_PACKED_FAMILY_GPU	BIT(0)
+#define KONA_PACKED_FAMILY_GMU	BIT(1)
+#define KONA_PACKED_FAMILY_ALL	(KONA_PACKED_FAMILY_GPU | \
+				 KONA_PACKED_FAMILY_GMU)
+
+enum kona_packed_owner {
+	KONA_PACKED_OWNER_PROVIDER,
+	KONA_PACKED_OWNER_KGSL_GMU,
+};
+
+struct kona_packed_client_desc {
+	u32 id;
+	unsigned int family;
+	const char *family_name;
+	const char *endpoint;
+	const char *candidate_bcms;
+	enum kona_packed_owner owner;
+	const char *blocked_reason;
+};
+
+/*
+ * Keep the ownership audit executable as data rather than inferring physical
+ * ownership from the legacy GPU_MEM/GPU_LLCC aliases.  On Kona those aliases
+ * are logical compatibility resources, while GMU HFI installs MC0/SH0/ACV
+ * TCS tables.  Until KGSL can explicitly transfer that table ownership, a
+ * second apps-RSC packed writer would race firmware, including during resume.
+ */
+static const struct kona_packed_client_desc kona_stage5_clients[] = {
+	{ KONA_ICC_GPU_TO_MEM, KONA_PACKED_FAMILY_GPU, "gpu", "ddr",
+	  "MC0/SH0/ACV (GMU HFI table)", KONA_PACKED_OWNER_KGSL_GMU,
+	  "KGSL/GMU runtime DCVS and firmware TCS retain physical ownership" },
+	{ KONA_ICC_GPU_TO_LLCC, KONA_PACKED_FAMILY_GPU, "gpu", "llcc",
+	  "SH0 (shared GMU HFI table)", KONA_PACKED_OWNER_KGSL_GMU,
+	  "no independently transferable GPU BCM is described by cmd-db/DT" },
+	{ KONA_ICC_GMU_TO_MEM, KONA_PACKED_FAMILY_GMU, "gmu", "ddr",
+	  "MC0/SH0/ACV", KONA_PACKED_OWNER_KGSL_GMU,
+	  "GMU firmware consumes and replays the HFI DDR bandwidth table" },
+	{ KONA_ICC_GMU_TO_LLCC, KONA_PACKED_FAMILY_GMU, "gmu", "llcc",
+	  "SH0", KONA_PACKED_OWNER_KGSL_GMU,
+	  "GMU firmware/TCS remains authoritative" },
 };
 
 struct kona_icc_node_desc {
@@ -159,6 +204,82 @@ struct kona_icc_data {
 static DEFINE_MUTEX(kona_packed_param_lock);
 static struct kona_icc_provider *kona_packed_provider;
 
+struct kona_gpu_contribution_state {
+	struct kona_icc_gpu_contribution value;
+	u64 generation, requested_generation, applied_generation;
+	u64 publish_count, clear_count, timestamp_ns;
+	bool valid;
+	int last_error;
+};
+
+static DEFINE_SPINLOCK(kona_gpu_contribution_lock);
+static struct kona_gpu_contribution_state kona_gpu_contribution;
+
+static bool kona_gpu_contribution_equal(
+		const struct kona_icc_gpu_contribution *left,
+		const struct kona_icc_gpu_contribution *right)
+{
+	return left->source == right->source &&
+		left->selected_level == right->selected_level &&
+		left->requested_level == right->requested_level &&
+		left->applied_level == right->applied_level &&
+		left->mc0_addr == right->mc0_addr &&
+		left->sh0_addr == right->sh0_addr &&
+		left->acv_addr == right->acv_addr &&
+		left->mc0_data == right->mc0_data &&
+		left->sh0_data == right->sh0_data &&
+		left->acv_data == right->acv_data &&
+		left->applied_valid == right->applied_valid &&
+		left->phase == right->phase;
+}
+
+void kona_icc_gpu_publish_contribution(
+		const struct kona_icc_gpu_contribution *value)
+{
+	unsigned long flags;
+	bool changed;
+
+	if (!value)
+		return;
+	spin_lock_irqsave(&kona_gpu_contribution_lock, flags);
+	changed = !kona_gpu_contribution.valid ||
+		!kona_gpu_contribution_equal(&kona_gpu_contribution.value, value);
+	kona_gpu_contribution.publish_count++;
+	if (changed) {
+		kona_gpu_contribution.generation++;
+		if (value->phase == KONA_ICC_GPU_PHASE_REQUESTED)
+			kona_gpu_contribution.requested_generation =
+				kona_gpu_contribution.generation;
+		else
+			kona_gpu_contribution.applied_generation =
+				kona_gpu_contribution.generation;
+		kona_gpu_contribution.value = *value;
+		kona_gpu_contribution.timestamp_ns = ktime_get_mono_fast_ns();
+	}
+	kona_gpu_contribution.valid = true;
+	kona_gpu_contribution.last_error = 0;
+	spin_unlock_irqrestore(&kona_gpu_contribution_lock, flags);
+}
+EXPORT_SYMBOL_GPL(kona_icc_gpu_publish_contribution);
+
+void kona_icc_gpu_clear_contribution(enum kona_icc_gpu_source source, int error)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&kona_gpu_contribution_lock, flags);
+	kona_gpu_contribution.clear_count++;
+	if (kona_gpu_contribution.valid ||
+	    kona_gpu_contribution.value.source != source) {
+		kona_gpu_contribution.generation++;
+		kona_gpu_contribution.timestamp_ns = ktime_get_mono_fast_ns();
+	}
+	kona_gpu_contribution.valid = false;
+	kona_gpu_contribution.value.source = source;
+	kona_gpu_contribution.last_error = error;
+	spin_unlock_irqrestore(&kona_gpu_contribution_lock, flags);
+}
+EXPORT_SYMBOL_GPL(kona_icc_gpu_clear_contribution);
+
 static void kona_icc_packed_parameter_changed(struct kona_icc_provider *qp,
 					       bool enabled);
 static bool kona_icc_is_cpu_memory_path(const struct kona_icc_node_desc *desc);
@@ -168,10 +289,10 @@ static void kona_icc_packed_force_generation(struct kona_icc_provider *qp);
 static void kona_icc_queue_replay(struct kona_icc_provider *qp,
 				 unsigned int delay_ms, const char *why);
 
-static bool kona_packed_runtime_enable;
-static bool kona_packed_dry_run = true;
-static bool kona_packed_real_write_enable;
-static bool kona_packed_real_write_once = true;
+static bool kona_packed_runtime_enable = true;
+static bool kona_packed_dry_run;
+static bool kona_packed_real_write_enable = true;
+static bool kona_packed_real_write_once;
 static bool kona_packed_real_write_rearm;
 static bool kona_packed_force_dirty;
 
@@ -481,10 +602,15 @@ module_param_named(rpmh_cpu_model, kona_rpmh_cpu_model, bool, 0444);
 MODULE_PARM_DESC(rpmh_cpu_model,
 		 "Deprecated: discover packed CPU BCM metadata without programming it");
 
-static unsigned int kona_rpmh_model;
+static unsigned int kona_rpmh_model = 4;
 module_param_named(rpmh_model, kona_rpmh_model, uint, 0444);
 MODULE_PARM_DESC(rpmh_model,
-	"Packed BCM migration: 0=legacy, 1=telemetry, 2=SH4, 3=SH4+SH0, 4=CPU, 5=validated clients");
+	"Packed BCM migration: 0=legacy, 1=telemetry, 2=SH4, 3=SH4+SH0, 4=CPU (default), 5=validated clients");
+
+static unsigned int kona_packed_family_mask;
+module_param_named(packed_family_mask, kona_packed_family_mask, uint, 0644);
+MODULE_PARM_DESC(packed_family_mask,
+		 "Stage-5 candidate families: bit 0=GPU, bit 1=GMU; arming does not override audited external ownership");
 
 static unsigned int kona_cpu_model_stage(void)
 {
@@ -4622,8 +4748,61 @@ static ssize_t physical_show(struct device *dev,
 
 	if (!node || !node->qp)
 		return -EINVAL;
+
+	if (kona_icc_is_gpu_path(&node->qp->nodes[node->index]) ||
+	    kona_icc_is_gmu_path(&node->qp->nodes[node->index])) {
+		struct kona_gpu_contribution_state state;
+		unsigned long flags;
+		const char *source;
+		u32 mc0_x = 0, mc0_y = 0, sh0_x = 0, sh0_y = 0;
+
+		spin_lock_irqsave(&kona_gpu_contribution_lock, flags);
+		state = kona_gpu_contribution;
+		spin_unlock_irqrestore(&kona_gpu_contribution_lock, flags);
+		source = state.value.source == KONA_ICC_GPU_SOURCE_GMU_HFI ?
+			"gmu-hfi" : state.value.source == KONA_ICC_GPU_SOURCE_MSM_BUS ?
+			"kgsl-msm-bus" : "none";
+		if (state.valid) {
+			mc0_x = (state.value.mc0_data >> KONA_BCM_VOTE_X_SHIFT) &
+				KONA_BCM_VOTE_MASK;
+			mc0_y = state.value.mc0_data & KONA_BCM_VOTE_MASK;
+			sh0_x = (state.value.sh0_data >> KONA_BCM_VOTE_X_SHIFT) &
+				KONA_BCM_VOTE_MASK;
+			sh0_y = state.value.sh0_data & KONA_BCM_VOTE_MASK;
+		}
+		return sysfs_emit(buf,
+			"stage=5 family=%s endpoint=%s integration_state=integrated-validated "
+			"owner=kona-logical physical_owner=gmu-firmware-tcs contribution_export=active "
+			"contribution_valid=%u source=%s selected_level=%u requested_level=%u "
+			"applied_level=%s%u mc0_addr=%#x sh0_addr=%#x acv_addr=%#x "
+			"mc0_data=%#x sh0_data=%#x acv_data=%#x mc0_x=%u mc0_y=%u "
+			"sh0_x=%u sh0_y=%u decode_valid=%u generation=%llu "
+			"requested_generation=%llu applied_generation=%llu publish_count=%llu "
+			"clear_count=%llu timestamp_ns=%llu packed_writes=0 fallback=%u "
+			"last_error=%d blocked_reason=firmware-abi shared_aggregation_capable=0 "
+			"handoff_blocked=1 logical_ab=%llu logical_ib=%llu\n",
+			kona_icc_is_gpu_path(&node->qp->nodes[node->index]) ? "gpu" : "gmu",
+			node->qp->nodes[node->index].name, state.valid, source,
+			state.value.selected_level, state.value.requested_level,
+			state.value.applied_valid ? "" : "unavailable/",
+			state.value.applied_level, state.value.mc0_addr,
+			state.value.sh0_addr, state.value.acv_addr, state.value.mc0_data,
+			state.value.sh0_data, state.value.acv_data, mc0_x, mc0_y,
+			sh0_x, sh0_y, state.valid,
+			(unsigned long long)state.generation,
+			(unsigned long long)state.requested_generation,
+			(unsigned long long)state.applied_generation,
+			(unsigned long long)state.publish_count,
+			(unsigned long long)state.clear_count,
+			(unsigned long long)state.timestamp_ns,
+			state.value.source == KONA_ICC_GPU_SOURCE_MSM_BUS,
+			state.last_error,
+			(unsigned long long)node->qp->last_ab[node->index],
+			(unsigned long long)node->qp->last_ib[node->index]);
+	}
 	if (!kona_icc_is_cpu_memory_path(&node->qp->nodes[node->index]))
 		return sysfs_emit(buf, "legacy-resource\n");
+
 	if (node->qp->packed_fallback_active)
 		packed_mode = "sticky-legacy-fallback";
 	else if (kona_cpu_model_stage() < 4 ||
@@ -5228,7 +5407,32 @@ static int kona_icc_probe(struct platform_device *pdev)
 
 	mutex_lock(&kona_packed_param_lock);
 	kona_packed_provider = qp;
+
+	/*
+	 * Production Stage-4 ownership is kernel-controlled.  Bootloader/ROM
+	 * command-line module parameters may still contain stale staged-bring-up
+	 * values (runtime_enable=0/group_mask=0), so normalize the packed CPU BCM
+	 * controls only after SH4/SH0/MC0 metadata validation has completed.
+	 *
+	 * A permanent metadata failure above demotes kona_rpmh_model to stage 1;
+	 * in that case leave packed ownership disabled and retain the legacy path.
+	 */
+	if (kona_cpu_model_stage() >= 4) {
+		WRITE_ONCE(kona_packed_group_mask, KONA_PACKED_GROUP_ALL);
+		WRITE_ONCE(kona_packed_dry_run, false);
+		WRITE_ONCE(kona_packed_real_write_enable, true);
+		WRITE_ONCE(kona_packed_real_write_once, false);
+		WRITE_ONCE(kona_packed_runtime_enable, false);
+	}
 	mutex_unlock(&kona_packed_param_lock);
+
+	/*
+	 * Use the normal ownership transition so every CPU<->LLCC/DDR path is
+	 * invalidated, marked dirty and replayed through the packed worker.  This
+	 * also avoids performing RPMh I/O directly from probe context.
+	 */
+	if (kona_cpu_model_stage() >= 4)
+		kona_icc_packed_parameter_changed(qp, true);
 
         return 0;
 
