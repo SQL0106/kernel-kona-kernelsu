@@ -1199,8 +1199,6 @@ static int snd_compress_remove_device(struct snd_compr *device)
  * @device: compressed device to register
  */
 
-static DEFINE_MUTEX(device_mutex);
-
 int snd_compress_register(struct snd_compr *device)
 {
 	int retval;
