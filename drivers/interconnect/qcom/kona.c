@@ -69,6 +69,33 @@ enum kona_icc_role {
 enum kona_packed_owner {
 	KONA_PACKED_OWNER_PROVIDER,
 	KONA_PACKED_OWNER_KGSL_GMU,
+	KONA_PACKED_OWNER_STORAGE_DRIVER,
+	KONA_PACKED_OWNER_DISPLAY_DRIVER,
+	KONA_PACKED_OWNER_VIDEO_DRIVER,
+	KONA_PACKED_OWNER_CVP_DRIVER,
+	KONA_PACKED_OWNER_MEDIA_DRIVERS,
+	KONA_PACKED_OWNER_CPAS,
+	KONA_PACKED_OWNER_CAMERA_FIRMWARE,
+};
+
+enum kona_media_migration_status {
+	KONA_MEDIA_MIGRATION_BLOCKED,
+};
+
+struct kona_media_owner_desc {
+	u32 logical_path;
+	const char *endpoint;
+	const char *family;
+	const char *candidate_bcms;
+	enum kona_packed_owner physical_owner;
+	const char *fallback_owner;
+	const char *firmware_owner;
+	const char *resume_replay_owner;
+	bool shared_resource;
+	bool private_context;
+	bool exclusive_handoff_possible;
+	enum kona_media_migration_status migration_status;
+	const char *blocked_reason;
 };
 
 struct kona_packed_client_desc {
@@ -102,6 +129,172 @@ static const struct kona_packed_client_desc kona_stage5_clients[] = {
 	  "SH0", KONA_PACKED_OWNER_KGSL_GMU,
 	  "GMU firmware/TCS remains authoritative" },
 };
+
+/*
+ * Stage 6 storage ownership audit.  The endpoint BCMs are deliberately
+ * descriptive rather than writable state: both storage drivers retain a
+ * live ICC-to-msm_bus fallback, and the Kona bus topology attaches the
+ * shared SH0/MC0/ACV BCMs downstream of the storage masters.  Therefore no
+ * storage-only cmd-db BCM can be exclusively transferred here.
+ */
+static const struct kona_packed_client_desc kona_stage6_storage_clients[] = {
+	{ KONA_ICC_UFS_TO_MEM, 0, "ufs", "kona-ufs-ddr",
+	  "SH0/MC0/ACV (shared downstream BCMs)", KONA_PACKED_OWNER_STORAGE_DRIVER,
+	  "ufs-qcom retains runtime ICC voting and registered msm_bus fallback" },
+	{ KONA_ICC_UFS_TO_LLCC, 0, "ufs", "kona-ufs-llcc",
+	  "SH0 (shared downstream BCM)", KONA_PACKED_OWNER_STORAGE_DRIVER,
+	  "ufs-qcom retains runtime ICC voting and registered msm_bus fallback" },
+	{ KONA_ICC_SDHC2_TO_MEM, 0, "sdhc2", "kona-sdhc2-ddr",
+	  "SH0/MC0/ACV (shared downstream BCMs)", KONA_PACKED_OWNER_STORAGE_DRIVER,
+	  "sdhci-msm can switch between ICC and legacy msm_bus voting" },
+};
+
+/*
+ * Stage 7 display ownership audit.  DISP0/DISP1 are compatibility endpoint
+ * names, not cmd-db BCM names.  The SDE power handle keeps both ICC and
+ * msm_bus clients alive and updates both; msm_bus in turn owns the display
+ * RSC MM0/MM1/SH0/MC0/ACV topology.  In particular, an ICC success does not
+ * retire the fallback client.  Keep Kona a logical policy/cache endpoint
+ * until that dual lifecycle (including SDE recovery and resume replay) is
+ * replaced by an explicit, atomic handoff.
+ */
+static const struct kona_packed_client_desc kona_stage7_display_clients[] = {
+	{ KONA_ICC_DISP0_TO_MEM, 0, "display", "disp0-ddr",
+	  "MM0/SH0/MC0/ACV (display RSC; downstream resources shared)",
+	  KONA_PACKED_OWNER_DISPLAY_DRIVER,
+	  "SDE/MDSS retain live ICC plus msm_bus lifecycle and resume/recovery replay" },
+	{ KONA_ICC_DISP1_TO_MEM, 0, "display", "disp1-ddr",
+	  "MM1/SH0/MC0/ACV (display RSC; downstream resources shared)",
+	  KONA_PACKED_OWNER_DISPLAY_DRIVER,
+	  "no uniquely named transferable cmd-db resource and msm_bus remains active" },
+	{ KONA_ICC_DISP_CFG, 0, "display", "disp-cfg",
+	  "MM0/CNOC plus display power-domain msm_bus vote",
+	  KONA_PACKED_OWNER_DISPLAY_DRIVER,
+	  "SDE/MDSS/dispcc can independently restore config bandwidth" },
+};
+
+/*
+ * Stage 8 VIDEO/CVP ownership audit.  These rows are intentionally not BCM
+ * state: the media drivers still submit ICC (and, for Venus, msm_bus fallback)
+ * votes at session, power-collapse and recovery boundaries.  MM0/MM1/MM2 are
+ * topology resource names whose address and aux data remain cmd-db supplied;
+ * SH0/MC0/ACV are shared downstream resources.  None is proven private and
+ * transferable, so Kona must remain a logical policy/cache endpoint.
+ */
+static const struct kona_media_owner_desc kona_stage8_media_clients[] = {
+	{ KONA_ICC_VIDEO_CFG, "video-cfg", "video-cvp-config",
+	  "CN0/MM0/MM1 plus shared config topology",
+	  KONA_PACKED_OWNER_MEDIA_DRIVERS, "vidc/cvp/videocc ICC clients",
+	  "none (HFI resource commands do not carry RPMh BCM votes)",
+	  "vidc, cvp and videocc probe/resume", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "shared config path has multiple live ICC replay owners" },
+	{ KONA_ICC_VIDEO_TO_LLCC, "video-llcc", "video",
+	  "MM0/SH0 (shared downstream BCM)",
+	  KONA_PACKED_OWNER_VIDEO_DRIVER, "venus msm_bus client",
+	  "none (host governor computes and submits bandwidth)",
+	  "venus HFI power-collapse/resume/SSR", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "Venus retains ICC/msm_bus fallback and lifecycle replay" },
+	{ KONA_ICC_VIDEO_TO_MEM, "video-ddr", "video",
+	  "MM0/SH0/MC0/ACV (shared downstream BCMs)",
+	  KONA_PACKED_OWNER_VIDEO_DRIVER, "venus msm_bus client",
+	  "none (host governor computes and submits bandwidth)",
+	  "venus HFI power-collapse/resume/SSR", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "Venus retains ICC/msm_bus fallback; DDR BCMs are shared" },
+	{ KONA_ICC_CVP_TO_MEM, "cvp-ddr", "cvp",
+	  "MM1/MM2/SH0/MC0/ACV (identity selected by bus topology)",
+	  KONA_PACKED_OWNER_CVP_DRIVER, "none proven; CVP ICC remains live",
+	  "none (host CVP governor submits ICC bandwidth)",
+	  "cvp HFI boot/resume/power-collapse/recovery", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "CVP ICC lifecycle can replay and no private BCM is proven" },
+};
+
+/*
+ * Stage 9 CAMERA ownership audit.  CPAS aggregates every registered camera
+ * client's AHB and AXI votes, then selects ICC or its still-live msm_bus
+ * client for these DT ports.  MM1/MM2 provide camera-facing topology, but
+ * neither their apps-RSC context nor an exclusive handoff is described;
+ * SH0/MC0/ACV are shared downstream.  ICP firmware can restart camera
+ * accelerators, while host CPAS replays their votes.  These are audit rows,
+ * never writable packed BCM state.
+ */
+static const struct kona_media_owner_desc kona_stage9_camera_clients[] = {
+	{ KONA_ICC_CAM_CFG, "cam-cfg", "camera",
+	  "CN0/MM1/MM2 (apps RSC config topology)",
+	  KONA_PACKED_OWNER_CPAS, "CPAS msm_bus cam_ahb client",
+	  "none (no BCM address or packed vote in camera firmware ABI)",
+	  "CPAS start/reprobe and camera client restart", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "CPAS owns AHB aggregation and its msm_bus fallback can replay" },
+	{ KONA_ICC_CAM_HF0_TO_MEM, "cam-hf0-ddr", "camera",
+	  "MM1/MM2/SH0/MC0/ACV (apps RSC; downstream shared)",
+	  KONA_PACKED_OWNER_CPAS, "CPAS msm_bus cam_hf_0_mnoc client",
+	  "ICP firmware drives workloads; host CPAS owns bandwidth replay",
+	  "CPAS client start/update after power collapse or recovery", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "CPAS ICC/msm_bus dual lifecycle remains live and DDR BCMs are shared" },
+	{ KONA_ICC_CAM_SF0_TO_MEM, "cam-sf0-ddr", "camera",
+	  "MM1/MM2/SH0/MC0/ACV (apps RSC; downstream shared)",
+	  KONA_PACKED_OWNER_CPAS, "CPAS msm_bus cam_sf_0_mnoc client",
+	  "ICP firmware drives IPE/BPS work; host CPAS owns bandwidth replay",
+	  "CPAS client start/update after power collapse or recovery", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "no camera-private cmd-db context is proven and CPAS can replay" },
+	{ KONA_ICC_CAM_SF_ICP_TO_MEM, "cam-sf-icp-ddr", "camera-icp",
+	  "MM1/MM2/SH0/MC0/ACV (apps RSC; downstream shared)",
+	  KONA_PACKED_OWNER_CPAS, "CPAS msm_bus cam_sf_icp_mnoc client",
+	  "ICP/A5 firmware lifecycle; no raw BCM commands found in HFI ABI",
+	  "ICP recovery restarts clients and CPAS restores aggregate vote", true, false, false,
+	  KONA_MEDIA_MIGRATION_BLOCKED,
+	  "firmware recovery plus CPAS fallback prevents exclusive handoff" },
+};
+
+static const struct kona_media_owner_desc *kona_camera_audit_desc(u32 id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(kona_stage9_camera_clients); i++)
+		if (kona_stage9_camera_clients[i].logical_path == id)
+			return &kona_stage9_camera_clients[i];
+
+	return NULL;
+}
+
+static const struct kona_media_owner_desc *kona_media_audit_desc(u32 id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(kona_stage8_media_clients); i++)
+		if (kona_stage8_media_clients[i].logical_path == id)
+			return &kona_stage8_media_clients[i];
+
+	return NULL;
+}
+
+static const struct kona_packed_client_desc *kona_display_audit_desc(u32 id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(kona_stage7_display_clients); i++)
+		if (kona_stage7_display_clients[i].id == id)
+			return &kona_stage7_display_clients[i];
+
+	return NULL;
+}
+
+static const struct kona_packed_client_desc *kona_storage_audit_desc(u32 id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(kona_stage6_storage_clients); i++)
+		if (kona_stage6_storage_clients[i].id == id)
+			return &kona_stage6_storage_clients[i];
+
+	return NULL;
+}
 
 struct kona_icc_node_desc {
         u32 id;
@@ -219,18 +412,20 @@ static bool kona_gpu_contribution_equal(
 		const struct kona_icc_gpu_contribution *left,
 		const struct kona_icc_gpu_contribution *right)
 {
+	/*
+	 * Compare only the effective bandwidth contribution.  The publication
+	 * phase and applied fields describe request/ACK bookkeeping and must not
+	 * advance the contribution generation by themselves.
+	 */
 	return left->source == right->source &&
 		left->selected_level == right->selected_level &&
 		left->requested_level == right->requested_level &&
-		left->applied_level == right->applied_level &&
 		left->mc0_addr == right->mc0_addr &&
 		left->sh0_addr == right->sh0_addr &&
 		left->acv_addr == right->acv_addr &&
 		left->mc0_data == right->mc0_data &&
 		left->sh0_data == right->sh0_data &&
-		left->acv_data == right->acv_data &&
-		left->applied_valid == right->applied_valid &&
-		left->phase == right->phase;
+		left->acv_data == right->acv_data;
 }
 
 void kona_icc_gpu_publish_contribution(
@@ -245,17 +440,17 @@ void kona_icc_gpu_publish_contribution(
 	changed = !kona_gpu_contribution.valid ||
 		!kona_gpu_contribution_equal(&kona_gpu_contribution.value, value);
 	kona_gpu_contribution.publish_count++;
+	if (value->phase == KONA_ICC_GPU_PHASE_REQUESTED)
+		kona_gpu_contribution.requested_generation =
+			kona_gpu_contribution.publish_count;
+	else
+		kona_gpu_contribution.applied_generation =
+			kona_gpu_contribution.publish_count;
 	if (changed) {
 		kona_gpu_contribution.generation++;
-		if (value->phase == KONA_ICC_GPU_PHASE_REQUESTED)
-			kona_gpu_contribution.requested_generation =
-				kona_gpu_contribution.generation;
-		else
-			kona_gpu_contribution.applied_generation =
-				kona_gpu_contribution.generation;
-		kona_gpu_contribution.value = *value;
 		kona_gpu_contribution.timestamp_ns = ktime_get_mono_fast_ns();
 	}
+	kona_gpu_contribution.value = *value;
 	kona_gpu_contribution.valid = true;
 	kona_gpu_contribution.last_error = 0;
 	spin_unlock_irqrestore(&kona_gpu_contribution_lock, flags);
@@ -710,6 +905,12 @@ module_param_named(kona_storage_raw_icc_enable,
 MODULE_PARM_DESC(kona_storage_raw_icc_enable,
 	"Program UFS/SDHC RPMh votes instead of accepting storage ICC paths as cached no-ops during bring-up");
 
+static bool kona_display_raw_icc_enable;
+module_param_named(kona_display_raw_icc_enable,
+		   kona_display_raw_icc_enable, bool, 0644);
+MODULE_PARM_DESC(kona_display_raw_icc_enable,
+	"DEBUG ONLY: program legacy display aliases despite the active SDE/MDSS msm_bus owner");
+
 static bool kona_gpu_raw_icc_enable;
 module_param_named(kona_gpu_raw_icc_enable,
 		   kona_gpu_raw_icc_enable, bool, 0644);
@@ -869,6 +1070,7 @@ static bool kona_icc_is_raw_role(const struct kona_icc_node_desc *desc)
 static bool kona_icc_is_replay_suppressed_path(const struct kona_icc_node_desc *desc)
 {
 	return kona_icc_is_crypto_path(desc) || kona_icc_is_raw_npu_path(desc) ||
+	       (!kona_display_raw_icc_enable && desc->role == KONA_ROLE_DISPLAY) ||
 	       (!kona_storage_raw_icc_enable && kona_icc_is_storage_path(desc)) ||
 	       (!kona_gpu_raw_icc_enable && kona_icc_is_gpu_path(desc)) ||
 	       (!kona_gmu_raw_icc_enable && kona_icc_is_gmu_path(desc)) ||
@@ -4616,6 +4818,16 @@ skip_perf_floor:
 		return 0;
 	}
 
+	/* Stage 7: preserve logical display policy without becoming a second BCM writer. */
+	if (desc->role == KONA_ROLE_DISPLAY && !kona_display_raw_icc_enable) {
+		if (qp->last_ab)
+			qp->last_ab[index] = ab;
+		if (qp->last_ib)
+			qp->last_ib[index] = ib;
+		kona_icc_clear_dirty(qp, index);
+		return 0;
+	}
+
 	/*
 	 * Best-effort synchronous programming:
 	 * - Apply the vote immediately when we're in a normal runtime window.
@@ -4755,6 +4967,8 @@ static ssize_t physical_show(struct device *dev,
 		unsigned long flags;
 		const char *source;
 		u32 mc0_x = 0, mc0_y = 0, sh0_x = 0, sh0_y = 0;
+		u64 logical_ab, logical_ib;
+		bool logical_valid;
 
 		spin_lock_irqsave(&kona_gpu_contribution_lock, flags);
 		state = kona_gpu_contribution;
@@ -4770,6 +4984,10 @@ static ssize_t physical_show(struct device *dev,
 				KONA_BCM_VOTE_MASK;
 			sh0_y = state.value.sh0_data & KONA_BCM_VOTE_MASK;
 		}
+		logical_valid = node->qp->last_ab[node->index] != U64_MAX &&
+			node->qp->last_ib[node->index] != U64_MAX;
+		logical_ab = logical_valid ? node->qp->last_ab[node->index] : 0;
+		logical_ib = logical_valid ? node->qp->last_ib[node->index] : 0;
 		return sysfs_emit(buf,
 			"stage=5 family=%s endpoint=%s integration_state=integrated-validated "
 			"owner=kona-logical physical_owner=gmu-firmware-tcs contribution_export=active "
@@ -4780,7 +4998,7 @@ static ssize_t physical_show(struct device *dev,
 			"requested_generation=%llu applied_generation=%llu publish_count=%llu "
 			"clear_count=%llu timestamp_ns=%llu packed_writes=0 fallback=%u "
 			"last_error=%d blocked_reason=firmware-abi shared_aggregation_capable=0 "
-			"handoff_blocked=1 logical_ab=%llu logical_ib=%llu\n",
+			"handoff_blocked=1 logical_valid=%u logical_ab=%llu logical_ib=%llu\n",
 			kona_icc_is_gpu_path(&node->qp->nodes[node->index]) ? "gpu" : "gmu",
 			node->qp->nodes[node->index].name, state.valid, source,
 			state.value.selected_level, state.value.requested_level,
@@ -4797,8 +5015,108 @@ static ssize_t physical_show(struct device *dev,
 			(unsigned long long)state.timestamp_ns,
 			state.value.source == KONA_ICC_GPU_SOURCE_MSM_BUS,
 			state.last_error,
-			(unsigned long long)node->qp->last_ab[node->index],
-			(unsigned long long)node->qp->last_ib[node->index]);
+			logical_valid, (unsigned long long)logical_ab,
+			(unsigned long long)logical_ib);
+	}
+	if (kona_icc_is_storage_path(&node->qp->nodes[node->index])) {
+		const struct kona_packed_client_desc *audit =
+			kona_storage_audit_desc(node->qp->nodes[node->index].id);
+		u64 requested_ab = node->qp->req_ab[node->index];
+		u64 requested_ib = node->qp->req_ib[node->index];
+		bool valid = requested_ab != U64_MAX && requested_ib != U64_MAX;
+
+		if (!audit)
+			return -EINVAL;
+		return sysfs_emit(buf,
+			"stage=6 diagnostic=%s physical_owner=%s cmd_db_resource=%s "
+			"raw=%llu/%llu requested_packed=unavailable committed_packed=unavailable "
+			"generation=0 submissions=0 retries=0 fallback=1 errors=0 "
+			"fully_migrated=0 externally_blocked=1 kona_physical_writes=0 "
+			"legacy_owner_unchanged=1 ownership_audited=1 blocked_reason=%s\n",
+			audit->endpoint,
+			audit->id == KONA_ICC_SDHC2_TO_MEM ?
+				"sdhci-msm/icc-or-msm_bus" : "ufs-qcom/icc-or-msm_bus",
+			audit->candidate_bcms,
+			(unsigned long long)(valid ? requested_ab : 0),
+			(unsigned long long)(valid ? requested_ib : 0),
+			audit->blocked_reason);
+	}
+	if (node->qp->nodes[node->index].role == KONA_ROLE_DISPLAY) {
+		const struct kona_packed_client_desc *audit =
+			kona_display_audit_desc(node->qp->nodes[node->index].id);
+		u64 requested_ab = node->qp->req_ab[node->index];
+		u64 requested_ib = node->qp->req_ib[node->index];
+		bool valid = requested_ab != U64_MAX && requested_ib != U64_MAX;
+
+		if (!audit)
+			return -EINVAL;
+		return sysfs_emit(buf,
+			"stage=7 family=display endpoint=%s integration_state=logical-policy-only "
+			"physical_owner=sde-mdss-msm_bus candidate_cmd_db_resources=%s "
+			"raw=%llu/%llu requested_packed=unavailable committed_packed=unavailable "
+			"generation=0 submissions=0 retries=0 failures=0 fallback=active "
+			"last_error=0 fully_migrated=0 externally_blocked=1 "
+			"kona_physical_writes=%u ownership_audited=1 display_private_context=1 "
+			"exclusive_resource_name=0 blocked_reason=%s\n",
+			audit->endpoint, audit->candidate_bcms,
+			(unsigned long long)(valid ? requested_ab : 0),
+			(unsigned long long)(valid ? requested_ib : 0),
+			kona_display_raw_icc_enable, audit->blocked_reason);
+	}
+	{
+		const struct kona_media_owner_desc *audit =
+			kona_camera_audit_desc(node->qp->nodes[node->index].id);
+		u64 requested_ab = node->qp->req_ab[node->index];
+		u64 requested_ib = node->qp->req_ib[node->index];
+		bool valid = requested_ab != U64_MAX && requested_ib != U64_MAX;
+
+		if (audit)
+			return sysfs_emit(buf,
+				"stage=9 family=%s endpoint=%s integration_state=logical-policy-only "
+				"physical_owner=cpas firmware_owner=%s fallback_owner=%s "
+				"resume_replay_owner=%s candidate_cmd_db_resources=%s "
+				"raw=%llu/%llu requested_packed=unavailable committed_packed=unavailable "
+				"generation=0 submissions=0 retries=0 failures=0 fallback=active "
+				"last_error=0 fully_migrated=0 externally_blocked=1 "
+				"kona_physical_writes=0 ownership_audited=1 shared_resource=%u "
+				"private_context=%u exclusive_handoff_possible=%u "
+				"migration_status=blocked blocked_reason=%s\n",
+				audit->family, audit->endpoint, audit->firmware_owner,
+				audit->fallback_owner, audit->resume_replay_owner,
+				audit->candidate_bcms,
+				(unsigned long long)(valid ? requested_ab : 0),
+				(unsigned long long)(valid ? requested_ib : 0),
+				audit->shared_resource, audit->private_context,
+				audit->exclusive_handoff_possible, audit->blocked_reason);
+	}
+	{
+		const struct kona_media_owner_desc *audit =
+			kona_media_audit_desc(node->qp->nodes[node->index].id);
+		u64 requested_ab = node->qp->req_ab[node->index];
+		u64 requested_ib = node->qp->req_ib[node->index];
+		bool valid = requested_ab != U64_MAX && requested_ib != U64_MAX;
+
+		if (audit)
+			return sysfs_emit(buf,
+				"stage=8 family=%s endpoint=%s integration_state=logical-policy-only "
+				"physical_owner=%s firmware_owner=%s fallback_owner=%s "
+				"resume_replay_owner=%s candidate_cmd_db_resources=%s "
+				"raw=%llu/%llu requested_packed=unavailable committed_packed=unavailable "
+				"generation=0 submissions=0 retries=0 failures=0 fallback=active "
+				"last_error=0 fully_migrated=0 externally_blocked=1 "
+				"kona_physical_writes=0 ownership_audited=1 shared_resource=%u "
+				"exclusive_handoff_possible=%u migration_status=blocked blocked_reason=%s\n",
+				audit->family, audit->endpoint,
+				audit->physical_owner == KONA_PACKED_OWNER_CVP_DRIVER ?
+					"cvp-driver-icc" :
+				audit->physical_owner == KONA_PACKED_OWNER_MEDIA_DRIVERS ?
+					"vidc-cvp-videocc-icc" : "video-driver-icc-msm_bus",
+				audit->firmware_owner, audit->fallback_owner,
+				audit->resume_replay_owner, audit->candidate_bcms,
+				(unsigned long long)(valid ? requested_ab : 0),
+				(unsigned long long)(valid ? requested_ib : 0),
+				audit->shared_resource,
+				audit->exclusive_handoff_possible, audit->blocked_reason);
 	}
 	if (!kona_icc_is_cpu_memory_path(&node->qp->nodes[node->index]))
 		return sysfs_emit(buf, "legacy-resource\n");
