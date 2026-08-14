@@ -1,3 +1,6 @@
+# 别刷，实测没法开机。
+用AI编内核纯属浪费钱，不学C语言和Linux内核，根本搞不出来能用的内核，光靠AI那个死脑子和Git Cherry-pick行不通的。
+
 # kernel-kona-kernelsu
 
 [Singularity](https://github.com/The-Anomalist/Singularity) 内核的 OnePlus 8 构建仓库，集成 [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)与[Droidspaces](https://github.com/ravindu644/Droidspaces-OSS)。
